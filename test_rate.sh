@@ -1,9 +1,8 @@
 #!/bin/bash
 
 for j in {1..100}; do
-   rnx=$((1 + RANDOM % 10))
-   for i in {1..10}; do
-     echo "line"
+   for (( c=0; c<=5+j; c++ )); do
+     echo "line ${j}"
    done
    sleep 1
 done

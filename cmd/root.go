@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"bufio"
+	"container/list"
 	"fmt"
 	"github.com/ahmetalpbalkan/go-cursor"
+	tm "github.com/buger/goterm"
 	"github.com/spf13/cobra"
 	"io"
 	"os"
@@ -11,8 +13,15 @@ import (
 	"time"
 )
 
+type Bucket struct {
+	bucketTime time.Time
+	count      *uint64
+	rate       *float64
+}
+
 var (
 	Plot                   bool
+	Table                  bool
 	BucketSeconds          int
 	StorageDurationSeconds int
 )
@@ -32,8 +41,7 @@ var versionCmd = &cobra.Command{
 }
 
 func awaitPipeCommands(cmd *cobra.Command, args []string) {
-
-	ringBuffer := make([]int, StorageDurationSeconds/BucketSeconds)
+	list := list.New()
 
 	info, err := os.Stdin.Stat()
 	if err != nil {
@@ -48,11 +56,9 @@ func awaitPipeCommands(cmd *cobra.Command, args []string) {
 	}
 
 	bucketSecondsFloat := float64(BucketSeconds)
-	lastBucket := 0
-	lastBucketCount := 0
 	reader := bufio.NewReader(os.Stdin)
 	lineCount := 0
-	lastPrintedSeconds := 0
+	lastPrintedTime := time.Now().Add(time.Duration(-5) * time.Second)
 	for {
 		_, isPrefix, err := reader.ReadLine()
 		if err != nil && err == io.EOF {
@@ -66,38 +72,84 @@ func awaitPipeCommands(cmd *cobra.Command, args []string) {
 			continue
 		}
 
-		nowSeconds := time.Now().Round(time.Second).Second()
-		bucketSecond := nowSeconds % BucketSeconds
-		diffPercent := float64(bucketSecond) / bucketSecondsFloat
-		bucket := (nowSeconds - bucketSecond) % len(ringBuffer)
-		if bucket != lastBucket {
-			lastBucketCount = ringBuffer[lastBucket]
-			ringBuffer[bucket] = 1
-		} else {
-			ringBuffer[bucket]++
+		now := time.Now()
+		nowSecondResolution := now.Round(time.Second)
+		nowBucketedTime := now.Round(time.Duration(BucketSeconds) * time.Second)
+		diffPercent := float64(nowBucketedTime.Second()) / bucketSecondsFloat
+
+		currentElement := list.Back()
+		if currentElement == nil || currentElement.Value.(Bucket).bucketTime != nowBucketedTime {
+			list.PushBack(Bucket{bucketTime: nowBucketedTime, count: new(uint64), rate: new(float64)})
+			currentElement = list.Back()
 		}
-		lastBucket = bucket
+
+		bucket := currentElement.Value.(Bucket)
+		*bucket.count++
 
 		// only sample every 1k lines or after 2s
-		if lineCount%1000 == 0 || (nowSeconds-lastPrintedSeconds) >= 2 {
-			rate := 0.0
-			if lastBucketCount != 0 {
-				// this is doing a smart average over the last two buckets to smooth out incomplete windows.
-				// it is based on how much of the window already passed and it is weighted based on that.
-				rate = (1.0-diffPercent)*(float64(lastBucketCount)/bucketSecondsFloat) + diffPercent*float64(ringBuffer[bucket])/bucketSecondsFloat
-			} else {
-				rate = float64(ringBuffer[bucket]) / bucketSecondsFloat
+		if lineCount%1000 == 0 || (nowSecondResolution.Add(time.Duration(-2) * time.Second).After(lastPrintedTime)) {
+
+			// cleanup old items
+			cutoffTime := nowSecondResolution.Add(time.Duration(-StorageDurationSeconds) * time.Second)
+			for list.Front().Value.(Bucket).bucketTime.Before(cutoffTime) {
+				list.Remove(list.Front())
 			}
 
-			fmt.Print(cursor.ClearEntireLine())
-			fmt.Printf("\rRate: %.2f/s", rate)
-			lastPrintedSeconds = nowSeconds
+			lastPrintedTime = nowSecondResolution
+			*bucket.rate = float64(*bucket.count) / bucketSecondsFloat
+			smoothedRate := 0.0
+
+			if list.Len() > 1 {
+				lastBucket := currentElement.Prev().Value.(Bucket)
+				// this is doing a smart average over the last two buckets to smooth out incomplete buckets.
+				// it is weighted on how much of the bucket already passed.
+				smoothedRate = (1.0-diffPercent)*(float64(*lastBucket.count)/bucketSecondsFloat) + diffPercent*float64(*bucket.count)/bucketSecondsFloat
+			}
+
+			if Plot {
+				tm.Clear()
+				tm.MoveCursor(0, 0)
+
+				chart := tm.NewLineChart(100, 20)
+
+				data := new(tm.DataTable)
+				data.AddColumn("Relative time in seconds")
+				data.AddColumn("Rate/s")
+
+				for e := list.Front(); e != nil; e = e.Next() {
+					i := e.Value.(Bucket)
+					data.AddRow(float64(i.bucketTime.Unix()-bucket.bucketTime.Unix()), *i.rate)
+				}
+
+				_, _ = tm.Println(chart.Draw(data))
+				tm.Flush()
+			} else if Table {
+				tm.Clear()
+				tm.MoveCursor(0, 0)
+
+				totals := tm.NewTable(0, 10, 5, ' ', 0)
+				_, _ = fmt.Fprintf(totals, "Time\tCount\tRate/s\n")
+				for e := list.Front(); e != nil; e = e.Next() {
+					i := e.Value.(Bucket)
+					_, _ = fmt.Fprintf(totals, "%s\t%d\t%f\n", i.bucketTime.String(), *i.count, *i.rate)
+				}
+				_, _ = tm.Println(totals)
+				tm.Flush()
+			} else {
+				fmt.Print(cursor.ClearEntireLine())
+				if list.Len() > 1 {
+					fmt.Printf("\rCurrent: %.2f/s, %ds weighted avg: %.2f/s", *bucket.rate, BucketSeconds*2, smoothedRate)
+				} else {
+					fmt.Printf("\rCurrent: %.2f/s", *bucket.rate)
+				}
+			}
 		}
 	}
 }
 
 func init() {
 	rootCmd.Flags().BoolVarP(&Plot, "plot", "", false, "If set, it will plot a rate graph on the terminal")
+	rootCmd.Flags().BoolVarP(&Table, "table", "", false, "If set, it will display a rate table on the terminal")
 	rootCmd.Flags().IntVarP(&BucketSeconds, "bucketDuration", "b", 5, "Duration of a measurement bucket in seconds, 5s by default")
 	rootCmd.Flags().IntVarP(&StorageDurationSeconds, "storageDuration", "s", 60, "How long to keep the counters around in seconds, 60s by default.")
 
