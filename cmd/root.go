@@ -85,6 +85,7 @@ func awaitPipeCommands(cmd *cobra.Command, args []string) {
 
 		bucket := currentElement.Value.(Bucket)
 		*bucket.count++
+		*bucket.rate = float64(*bucket.count) / bucketSecondsFloat		
 
 		// only sample every 1k lines or after 2s
 		if lineCount%1000 == 0 || (nowSecondResolution.Add(time.Duration(-2) * time.Second).After(lastPrintedTime)) {
@@ -96,7 +97,6 @@ func awaitPipeCommands(cmd *cobra.Command, args []string) {
 			}
 
 			lastPrintedTime = nowSecondResolution
-			*bucket.rate = float64(*bucket.count) / bucketSecondsFloat
 			smoothedRate := 0.0
 
 			if list.Len() > 1 {
