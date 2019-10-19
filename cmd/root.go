@@ -75,7 +75,6 @@ func awaitPipeCommands(cmd *cobra.Command, args []string) {
 		now := time.Now()
 		nowSecondResolution := now.Round(time.Second)
 		nowBucketedTime := now.Round(time.Duration(BucketSeconds) * time.Second)
-		diffPercent := float64(nowBucketedTime.Second()) / bucketSecondsFloat
 
 		currentElement := list.Back()
 		if currentElement == nil || currentElement.Value.(Bucket).bucketTime != nowBucketedTime {
@@ -85,7 +84,7 @@ func awaitPipeCommands(cmd *cobra.Command, args []string) {
 
 		bucket := currentElement.Value.(Bucket)
 		*bucket.count++
-		*bucket.rate = float64(*bucket.count) / bucketSecondsFloat		
+		*bucket.rate = float64(*bucket.count) / bucketSecondsFloat
 
 		// only sample every 1k lines or after 2s
 		if lineCount%1000 == 0 || (nowSecondResolution.Add(time.Duration(-2) * time.Second).After(lastPrintedTime)) {
@@ -97,14 +96,6 @@ func awaitPipeCommands(cmd *cobra.Command, args []string) {
 			}
 
 			lastPrintedTime = nowSecondResolution
-			smoothedRate := 0.0
-
-			if list.Len() > 1 {
-				lastBucket := currentElement.Prev().Value.(Bucket)
-				// this is doing a smart average over the last two buckets to smooth out incomplete buckets.
-				// it is weighted on how much of the bucket already passed.
-				smoothedRate = (1.0-diffPercent)*(float64(*lastBucket.count)/bucketSecondsFloat) + diffPercent*float64(*bucket.count)/bucketSecondsFloat
-			}
 
 			if Plot {
 				tm.Clear()
@@ -137,11 +128,7 @@ func awaitPipeCommands(cmd *cobra.Command, args []string) {
 				tm.Flush()
 			} else {
 				fmt.Print(cursor.ClearEntireLine())
-				if list.Len() > 1 {
-					fmt.Printf("\rCurrent: %.2f/s, %ds weighted avg: %.2f/s", *bucket.rate, BucketSeconds*2, smoothedRate)
-				} else {
-					fmt.Printf("\rCurrent: %.2f/s", *bucket.rate)
-				}
+				fmt.Printf("\rCurrent: %.2f/s", *bucket.rate)
 			}
 		}
 	}
